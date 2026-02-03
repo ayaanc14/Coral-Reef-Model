@@ -1,8 +1,9 @@
 # app.py
-# Location: repo root (same level as train_model.py, requirements.txt)
+# Location: repo root
 
 from pathlib import Path
 import joblib
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -10,6 +11,9 @@ MODEL_PATH = Path("models/region_model.joblib")
 
 st.set_page_config(page_title="Coral Reef Region Predictor", layout="wide")
 st.title("Coral Reef Region Predictor")
+
+# Must match training
+CATEGORICAL_COLS = ["substrate_type", "light_availability", "marine_protection_status"]
 
 @st.cache_resource
 def load_artifacts():
@@ -22,18 +26,39 @@ def load_artifacts():
 def align_features(df: pd.DataFrame, expected_cols: list[str]) -> pd.DataFrame:
     """
     Make uploaded data match training-time raw feature columns:
-    - add missing cols as NA
+    - add missing cols as np.nan (NOT pd.NA)
     - drop extra cols
     - reorder columns
+    - coerce numeric columns to numeric (bad values -> np.nan)
     """
     df = df.copy()
 
+    # Add missing columns using np.nan so sklearn can handle it
     for c in expected_cols:
         if c not in df.columns:
-            df[c] = pd.NA
+            df[c] = np.nan
 
+    # Drop extra columns
     df = df.drop(columns=[c for c in df.columns if c not in expected_cols])
-    return df[expected_cols]
+
+    # Reorder
+    df = df[expected_cols]
+
+    # Replace any pandas NA types with np.nan
+    df = df.replace({pd.NA: np.nan})
+
+    # Coerce numeric columns to numeric (everything except known categoricals)
+    numeric_cols = [c for c in expected_cols if c not in CATEGORICAL_COLS]
+    for c in numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Ensure categoricals are strings or nan
+    for c in CATEGORICAL_COLS:
+        if c in df.columns:
+            df[c] = df[c].astype("string")
+            df[c] = df[c].replace({"<NA>": np.nan})
+
+    return df
 
 artifacts = load_artifacts()
 pipeline = artifacts["pipeline"]
@@ -42,11 +67,9 @@ expected_cols = artifacts["expected_feature_columns"]
 
 st.write("Upload a CSV of features (**no `region` column**).")
 
-with st.expander("What columns should my CSV have?"):
+with st.expander("CSV columns"):
     st.write("Your CSV should contain these feature columns (order doesn’t matter):")
     st.code(", ".join(expected_cols))
-
-    # Provide a downloadable empty template with correct headers
     template_df = pd.DataFrame(columns=expected_cols)
     st.download_button(
         "Download CSV template (headers only)",
@@ -64,13 +87,8 @@ if uploaded is not None:
         st.error(f"Could not read the CSV. Error: {e}")
         st.stop()
 
-    # ✅ Critical guard: stop if CSV has headers but no rows
     if df.shape[0] == 0:
-        st.error(
-            "Your CSV was read successfully, but it contains **0 rows**.\n\n"
-            "This usually happens if you uploaded a template/header-only file, or the file has no data.\n\n"
-            "Add at least **one observation row** and re-upload."
-        )
+        st.error("Your CSV has **0 rows**. Add at least one data row and re-upload.")
         st.stop()
 
     st.write("Preview:")
@@ -78,21 +96,15 @@ if uploaded is not None:
 
     X = align_features(df, expected_cols)
 
-    # Another guard: if somehow rows got lost (shouldn't happen), stop safely
+    # Safety checks
     if X.shape[0] == 0:
-        st.error("After aligning columns, there are 0 rows to predict on. Please upload a CSV with data rows.")
+        st.error("After aligning columns, there are 0 rows to predict on.")
         st.stop()
 
     try:
         y_pred = pipeline.predict(X)
     except Exception as e:
-        st.error(
-            "Prediction failed. Common causes:\n"
-            "- Wrong delimiter/format (e.g. semicolon-separated file)\n"
-            "- Columns not matching expected names\n"
-            "- Non-CSV file uploaded\n\n"
-            f"Full error:\n{e}"
-        )
+        st.error(f"Prediction failed.\n\nFull error:\n{e}")
         st.stop()
 
     regions = label_encoder.inverse_transform(y_pred)
