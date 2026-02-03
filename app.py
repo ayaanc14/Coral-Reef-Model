@@ -25,38 +25,37 @@ def load_artifacts():
 
 def align_features(df: pd.DataFrame, expected_cols: list[str]) -> pd.DataFrame:
     """
-    Make uploaded data match training-time raw feature columns:
-    - add missing cols as np.nan (NOT pd.NA)
-    - drop extra cols
-    - reorder columns
-    - coerce numeric columns to numeric (bad values -> np.nan)
+    Align uploaded CSV to training-time raw feature columns and ensure sklearn-safe nulls.
+    Key rule: sklearn likes np.nan, but NOT pd.NA.
     """
     df = df.copy()
 
-    # Add missing columns using np.nan so sklearn can handle it
+    # Add missing columns as np.nan
     for c in expected_cols:
         if c not in df.columns:
             df[c] = np.nan
 
-    # Drop extra columns
+    # Drop extra columns and reorder
     df = df.drop(columns=[c for c in df.columns if c not in expected_cols])
-
-    # Reorder
     df = df[expected_cols]
 
-    # Replace any pandas NA types with np.nan
-    df = df.replace({pd.NA: np.nan})
+    # Convert the entire frame to object so we can safely hold mixed types,
+    # then force ALL missing values to np.nan (this kills pd.NA / <NA>).
+    df = df.astype(object)
+    df = df.where(pd.notna(df), np.nan)
 
-    # Coerce numeric columns to numeric (everything except known categoricals)
+    # Coerce numerics: everything except known categoricals
     numeric_cols = [c for c in expected_cols if c not in CATEGORICAL_COLS]
     for c in numeric_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Ensure categoricals are strings or nan
+    # Ensure categoricals are plain python strings or np.nan (NOT pandas string dtype)
     for c in CATEGORICAL_COLS:
         if c in df.columns:
-            df[c] = df[c].astype("string")
-            df[c] = df[c].replace({"<NA>": np.nan})
+            df[c] = df[c].apply(lambda x: x if (x is np.nan or x is None) else str(x))
+
+    # Final safety: ensure no pd.NA survived
+    df = df.replace({pd.NA: np.nan})
 
     return df
 
@@ -96,10 +95,11 @@ if uploaded is not None:
 
     X = align_features(df, expected_cols)
 
-    # Safety checks
-    if X.shape[0] == 0:
-        st.error("After aligning columns, there are 0 rows to predict on.")
-        st.stop()
+    # Helpful debug if needed
+    with st.expander("Debug (after alignment)"):
+        st.write("Rows, cols:", X.shape)
+        st.write("Null counts (top 20):")
+        st.dataframe(X.isna().sum().sort_values(ascending=False).head(20))
 
     try:
         y_pred = pipeline.predict(X)
@@ -108,7 +108,6 @@ if uploaded is not None:
         st.stop()
 
     regions = label_encoder.inverse_transform(y_pred)
-
     out = df.copy()
     out["predicted_region"] = regions
 
@@ -121,3 +120,4 @@ if uploaded is not None:
         file_name="coral_reef_predictions.csv",
         mime="text/csv",
     )
+
